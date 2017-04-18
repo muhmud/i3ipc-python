@@ -28,6 +28,7 @@ class Event(object):
     WINDOW = (1 << 3)
     BARCONFIG_UPDATE = (1 << 4)
     BINDING = (1 << 5)
+    KEY_RELEASE = (1 << 6)
 
 
 class _ReplyType(dict):
@@ -43,155 +44,15 @@ class _ReplyType(dict):
 
 
 class CommandReply(_ReplyType):
-    """
-    Info about a command that was executed with :func:`Connection.command`.
-    """
-    def __init__(self, data):
-        super(CommandReply, self).__init__(data)
-
-    @property
-    def error(self):
-        """
-        A human-readable error message
-
-        :type: str
-        """
-        return self.__getattr__('error')
-
-    @property
-    def success(self):
-        """
-        Whether the command executed successfully
-
-        :type: bool
-        """
-        return self.__getattr__('success')
+    pass
 
 
 class VersionReply(_ReplyType):
-    """
-    Info about the version of the running i3 instance.
-    """
-    def __init__(self, data):
-        super(VersionReply, self).__init__(data)
+    pass
 
-    @property
-    def major(self):
-        """
-        The major version of i3.
-
-        :type: int
-        """
-        return self.__getattr__('major')
-
-    @property
-    def minor(self):
-        """
-        The minor version of i3.
-
-        :type: int
-        """
-        return self.__getattr__('minor')
-
-    @property
-    def patch(self):
-        """
-        The patch version of i3.
-
-        :type: int
-        """
-        return self.__getattr__('patch')
-
-    @property
-    def human_readable(self):
-        """
-        A human-readable version of i3 containing the precise git version,
-        build date, and branch name.
-
-        :type: str
-        """
-        return self.__getattr__('human_readable')
-
-    @property
-    def loaded_config_file_name(self):
-        """
-        The current config path.
-
-        :type: str
-        """
-        return self.__getattr__('loaded_config_file_name')
 
 class BarConfigReply(_ReplyType):
-    """
-    This can be used by third-party workspace bars (especially i3bar, but
-    others are free to implement compatible alternatives) to get the bar block
-    configuration from i3.
-
-    Not all properties are documented here. A complete list of properties of
-    this reply type can be found `here
-    <http://i3wm.org/docs/ipc.html#_bar_config_reply>`_.
-    """
-    def __init__(self, data):
-        super(BarConfigReply, self).__init__(data)
-
-    @property
-    def colors(self):
-        """
-        Contains key/value pairs of colors. Each value is a color code in hex,
-        formatted #rrggbb (like in HTML). 
-
-        :type: dict
-        """
-        return self.__getattr__('colors')
-
-    @property
-    def id(self):
-        """
-        The ID for this bar.
-
-        :type: str
-        """
-        return self.__getattr__('id')
-
-    @property
-    def mode(self):
-        """
-        Either ``dock`` (the bar sets the dock window type) or ``hide`` (the
-        bar does not show unless a specific key is pressed). 
-
-        :type: str
-        """
-        return self.__getattr__('mode')
-
-    @property
-    def position(self):
-        """
-        Either ``bottom`` or ``top``.
-
-        :type: str
-        """
-        return self.__getattr__('position')
-
-    @property
-    def status_command(self):
-        """
-        Command which will be run to generate a statusline. Each line on
-        stdout of this command will be displayed in the bar. At the moment, no
-        formatting is supported. 
-
-        :type: str
-        """
-        return self.__getattr__('status_command')
-
-    @property
-    def font(self):
-        """
-        The font to use for text on the bar. 
-
-        :type: str
-        """
-        return self.__getattr__('font')
-
+    pass
 
 
 class OutputReply(_ReplyType):
@@ -303,20 +164,6 @@ class _PropsObject(object):
 
 
 class Connection(object):
-    """
-    This class controls a connection to the i3 ipc socket. It is capable of
-    executing commands, subscribing to window manager events, and querying the
-    window manager for information about the current state of windows,
-    workspaces, outputs, and the i3bar. For more information, see the `ipc
-    documentation <http://i3wm.org/docs/ipc.html>`_
-
-    :param str socket_path: The path for the socket to the current i3 session.
-        In most situations, you will not have to supply this yourself. Guessing
-        first happens by the environment variable :envvar:`I3SOCK`, and, if this is
-        empty, by executing :command:`i3 --get-socketpath`.
-    :raises Exception: If the connection to ``i3`` cannot be established, or when
-        the connection terminates.
-    """
     MAGIC = 'i3-ipc'  # safety string for i3-ipc
     _chunk_size = 1024  # in bytes
     _timeout = 0.5  # in seconds
@@ -348,9 +195,9 @@ class Connection(object):
         Packs the given message type and payload. Turns the resulting
         message into a byte string.
         """
-        pb = payload.encode('utf-8')
+        pb = payload.encode()
         s = struct.pack('=II', len(pb), msg_type.value)
-        return self.MAGIC.encode('utf-8') + s + pb
+        return self.MAGIC.encode() + s + pb
 
     def _unpack(self, data):
         """
@@ -404,53 +251,15 @@ class Connection(object):
         return self._ipc_send(self.cmd_socket, message_type, payload)
 
     def command(self, payload):
-        """
-        Send a command to i3. See the `list of commands
-        <http://i3wm.org/docs/userguide.html#_list_of_commands>`_ in the user
-        guide for available commands. Pass the text of the command to execute
-        as the first arguments. This is essentially the same as using
-        ``i3-msg`` or an ``exec`` block in your i3 config to control the
-        window manager.
-
-        :rtype: List of :class:`CommandReply`.
-        """
         data = self.message(MessageType.COMMAND, payload)
         return json.loads(data, object_hook=CommandReply)
 
     def get_version(self):
-        """
-        Get json encoded information about the running i3 instance.  The
-        equivalent of :command:`i3-msg -t get_version`. The return
-        object exposes the following attributes :attr:`~VersionReply.major`,
-        :attr:`~VersionReply.minor`, :attr:`~VersionReply.patch`,
-        :attr:`~VersionReply.human_readable`, and 
-        :attr:`~VersionReply.loaded_config_file_name`.
-
-        Example output:
-
-        .. code:: json
-
-            {'patch': 0,
-             'human_readable': '4.12 (2016-03-06, branch "4.12")',
-             'major': 4,
-             'minor': 12,
-             'loaded_config_file_name': '/home/joep/.config/i3/config'}
-
-
-        :rtype: VersionReply
-
-        """
         data = self.message(MessageType.GET_VERSION, '')
         return json.loads(data, object_hook=VersionReply)
 
     def get_bar_config(self, bar_id=None):
-        """
-        Get the configuration of a single bar. Defaults to the first if none is
-        specified. Use :meth:`get_bar_config_list` to obtain a list of valid
-        IDs.
-
-        :rtype: BarConfigReply
-        """
+        # default to the first bar id
         if not bar_id:
             bar_config_list = self.get_bar_config_list()
             if not bar_config_list:
@@ -461,60 +270,18 @@ class Connection(object):
         return json.loads(data, object_hook=BarConfigReply)
 
     def get_bar_config_list(self):
-        """
-        Get list of bar IDs as active in the connected i3 session.
-
-        :rtype: List of strings that can be fed as ``bar_id`` into
-            :meth:`get_bar_config`.
-        """
         data = self.message(MessageType.GET_BAR_CONFIG, '')
         return json.loads(data)
 
     def get_outputs(self):
-        """
-        Get a list of outputs.  The equivalent of :command:`i3-msg -t get_outputs`.
-
-        :rtype: List of :class:`OutputReply`.
-
-        Example output:
-
-        .. code:: python
-
-            >>> i3ipc.Connection().get_outputs()
-            [{'name': 'eDP1',
-              'primary': True,
-              'active': True,
-              'rect': {'width': 1920, 'height': 1080, 'y': 0, 'x': 0},
-              'current_workspace': '2'},
-             {'name': 'xroot-0',
-              'primary': False,
-              'active': False,
-              'rect': {'width': 1920, 'height': 1080, 'y': 0, 'x': 0},
-              'current_workspace': None}]
-        """
         data = self.message(MessageType.GET_OUTPUTS, '')
         return json.loads(data, object_hook=OutputReply)
 
     def get_workspaces(self):
-        """
-        Get a list of workspaces. Returns JSON-like data, not a Con instance.
-
-        You might want to try the :meth:`Con.workspaces` instead if the info
-        contained here is too little.
-
-        :rtype: List of :class:`WorkspaceReply`.
-
-        """
         data = self.message(MessageType.GET_WORKSPACES, '')
         return json.loads(data, object_hook=WorkspaceReply)
 
     def get_tree(self):
-        """
-        Returns a :class:`Con` instance with all kinds of methods and selectors.
-        Start here with exploration. Read up on the :class:`Con` stuffs.
-
-        :rtype: Con
-        """
         data = self.message(MessageType.GET_TREE, '')
         return Con(json.loads(data), None, self)
 
@@ -532,6 +299,8 @@ class Connection(object):
             events_obj.append("barconfig_update")
         if events & Event.BINDING:
             events_obj.append("binding")
+        if events & Event.KEY_RELEASE:
+            events_obj.append("key_release")
 
         data = self._ipc_send(
             self.sub_socket, MessageType.SUBSCRIBE, json.dumps(events_obj))
@@ -563,12 +332,14 @@ class Connection(object):
             event_type = Event.BARCONFIG_UPDATE
         elif event == "binding":
             event_type = Event.BINDING
+        elif event == "key_release":
+            event_type = Event.KEY_RELEASE
 
         if not event_type:
             raise Exception('event not implemented')
 
         self.subscriptions |= event_type
-
+        
         self._pubsub.subscribe(detailed_event, handler)
 
     def main(self):
@@ -611,6 +382,9 @@ class Connection(object):
             elif msg_type == Event.BINDING:
                 event_name = 'binding'
                 event = BindingEvent(data)
+            elif msg_type == Event.KEY_RELEASE:
+                event_name = 'key_release'
+                event = GenericEvent(data)
             else:
                 # we have not implemented this event
                 continue
@@ -631,166 +405,8 @@ class Rect(object):
         self.height = data['height']
         self.width = data['width']
 
-class Gaps(object):
-
-    def __init__(self,data):
-        self.inner = data['inner']
-        self.outer = data['outer']
-
 
 class Con(object):
-    """
-    The container class. Has all internal information about the windows,
-    outputs, workspaces and containers that :command:`i3` manages.
-
-    .. attribute:: id
-
-        The internal ID (actually a C pointer value within i3) of the container.
-        You can use it to (re-)identify and address containers when talking to
-        i3.
-
-    .. attribute:: name
-
-        The internal name of the container.  ``None`` for containers which
-        are not leaves.  The string `_NET_WM_NAME <://specifications.freedesktop.org/wm-spec/1.3/ar01s05.html#idm140238712347280>`_
-        for windows. Read-only value.
-
-    .. attribute:: type
-
-        The type of the container. Can be one of ``root``, ``output``, ``con``,
-        ``floating_con``, ``workspace`` or ``dockarea``.
-
-    .. attribute:: title
-
-        The window title.
-
-    .. attribute:: window_class
-
-        The window class.
-
-    .. attribute:: instance
-
-        The instance name of the window class.
-
-    .. attribute:: gaps
-
-        The inner and outer gaps devation from default values.
-
-    .. attribute:: border
-
-        The type of border style for the selected container. Can be either
-        ``normal``, ``none`` or ``1pixel``.
-
-    .. attribute:: current_border_width
-
-       Returns amount of pixels for the border. Readonly value. See `i3's user
-       manual <https://i3wm.org/docs/userguide.html#_border_style_for_new_windows>_
-       for more info.
-
-    .. attribute:: layout
-
-        Can be either ``splith``, ``splitv``, ``stacked``, ``tabbed``, ``dockarea`` or
-        ``output``.
-        :rtype: string
-
-    .. attribute:: percent
-
-        The percentage which this container takes in its parent. A value of
-        null means that the percent property does not make sense for this
-        container, for example for the root container.
-        :rtype: float
-
-    .. attribute:: rect
-
-        The absolute display coordinates for this container. Display
-        coordinates means that when you have two 1600x1200 monitors on a single
-        X11 Display (the standard way), the coordinates of the first window on
-        the second monitor are ``{ "x": 1600, "y": 0, "width": 1600, "height":
-        1200 }``.
-
-    .. attribute:: window_rect
-
-        The coordinates of the *actual client window* inside the container,
-        without the window decorations that may also occupy space.
-
-    .. attribute:: deco_rect
-
-        The coordinates of the window decorations within a container. The
-        coordinates are relative to the container and do not include the client
-        window.
-
-    .. attribute:: geometry
-
-        The original geometry the window specified when i3 mapped it. Used when
-        switching a window to floating mode, for example.
-
-    .. attribute:: window
-
-        The X11 window ID of the client window.
-
-    .. attribute:: focused
-
-        Whether or not the current container is focused. There is only
-        one focused container.
-
-    .. attribute:: visible
-
-        Whether or not the current container is visible.
-
-    .. attribute:: num
-
-        Optional attribute that only makes sense for workspaces. This allows
-        for arbitrary and changeable names, even though the keyboard
-        shortcuts remain the same.  See `the i3wm docs <https://i3wm.org/docs/userguide.html#_named_workspaces>`_
-        for more information
-
-    .. attribute:: urgent
-
-        Whether the window or workspace has the `urgent` state.
-
-        :returns: :bool:`True` or :bool:`False`.
-
-    .. attribute:: floating
-
-        Whether the container is floating or not. Possible values are
-        "auto_on", "auto_off", "user_on" and "user_off"
-
-
-    ..
-        command <-- method
-        command_children <-- method
-        deco_rect IPC
-        descendents
-        find_by_id
-        find_by_role
-        find_by_window
-        find_classed
-        find_focused
-        find_fullscreen
-        find_marked
-        find_named
-        floating
-        floating_nodes
-        fullscreen_mode
-        gaps
-        leaves
-        marks
-        nodes
-        orientation
-        parent
-        props
-        root
-        scratchpad
-        scratchpad_state
-        window_class
-        window_instance
-        window_rect
-        window_role
-        workspace
-        workspaces
-
-
-    """
 
     def __init__(self, data, parent, conn):
         self.props = _PropsObject(self)
@@ -813,10 +429,6 @@ class Con(object):
             self.marks = []
             if 'mark' in data and data['mark']:
                 self.marks.append(data['mark'])
-
-        # Possible values 'user_off', 'user_on', 'auto_off', 'auto_on'
-        if data['floating']:
-            self.floating = data['floating']
 
         # XXX this is for compatability with 4.8
         if isinstance(self.type, int):
@@ -857,17 +469,7 @@ class Con(object):
         if 'deco_rect' in data:
             self.deco_rect = Rect(data['deco_rect'])
 
-        self.gaps = None
-        if 'gaps' in data:
-            self.gaps = Gaps(data['gaps'])
-
     def root(self):
-        """
-        Retrieves the root container.
-
-        :rtype: :class:`Con`.
-        """
-
         if not self.parent:
             return self
 
@@ -879,12 +481,6 @@ class Con(object):
         return con
 
     def descendents(self):
-        """
-        Retrieve a list of all containers that delineate from the currently
-        selected container.  Includes any kind of container.
-
-        :rtype: List of :class:`Con`.
-        """
         descendents = []
 
         def collect_descendents(con):
@@ -899,13 +495,6 @@ class Con(object):
         return descendents
 
     def leaves(self):
-        """
-        Retrieve a list of windows that delineate from the currently
-        selected container.  Only lists client windows, no intermediate
-        containers.
-
-        :rtype: List of :class:`Con`.
-        """
         leaves = []
 
         for c in self.descendents():
@@ -915,20 +504,9 @@ class Con(object):
         return leaves
 
     def command(self, command):
-        """
-        Run a command on the currently active container.
-
-        :rtype: CommandReply
-        """
         self._conn.command('[con_id="{}"] {}'.format(self.id, command))
 
     def command_children(self, command):
-        """
-        Run a command on the direct children of the currently selected
-        container.
-
-        :rtype: List of CommandReply????
-        """
         if not len(self.nodes):
             return
 
@@ -939,11 +517,6 @@ class Con(object):
         self._conn.command(' '.join(commands))
 
     def workspaces(self):
-        """
-        Retrieve a list of currently active workspaces.
-
-        :rtype: List of :class:`Con`.
-        """
         workspaces = []
 
         def collect_workspaces(con):
@@ -958,11 +531,6 @@ class Con(object):
         return workspaces
 
     def find_focused(self):
-        """
-        Finds the focused container.
-
-        :rtype class Con:
-        """
         try:
             return next(c for c in self.descendents() if c.focused)
         except StopIteration:
@@ -991,10 +559,6 @@ class Con(object):
     def find_classed(self, pattern):
         return [c for c in self.descendents()
                 if c.window_class and re.search(pattern, c.window_class)]
-
-    def find_instanced(self, pattern):
-        return [c for c in self.descendents()
-                if c.window_instance and re.search(pattern, c.window_instance)]
 
     def find_marked(self, pattern=".*"):
         pattern = re.compile(pattern)
