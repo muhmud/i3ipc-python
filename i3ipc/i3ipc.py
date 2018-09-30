@@ -29,6 +29,7 @@ class Event(object):
     BARCONFIG_UPDATE = (1 << 4)
     BINDING = (1 << 5)
     KEY_RELEASE = (1 << 6)
+    KEY_PRESS = (1 << 7)
 
 
 class _ReplyType(dict):
@@ -301,6 +302,8 @@ class Connection(object):
             events_obj.append("binding")
         if events & Event.KEY_RELEASE:
             events_obj.append("key_release")
+        if events & Event.KEY_PRESS:
+            events_obj.append("key_press")
 
         data = self._ipc_send(
             self.sub_socket, MessageType.SUBSCRIBE, json.dumps(events_obj))
@@ -334,6 +337,8 @@ class Connection(object):
             event_type = Event.BINDING
         elif event == "key_release":
             event_type = Event.KEY_RELEASE
+        elif event == "key_press":
+            event_type = Event.KEY_PRESS
 
         if not event_type:
             raise Exception('event not implemented')
@@ -384,6 +389,9 @@ class Connection(object):
                 event = BindingEvent(data)
             elif msg_type == Event.KEY_RELEASE:
                 event_name = 'key_release'
+                event = GenericEvent(data)
+            elif msg_type == Event.KEY_PRESS:
+                event_name = 'key_press'
                 event = GenericEvent(data)
             else:
                 # we have not implemented this event
