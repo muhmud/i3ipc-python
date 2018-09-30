@@ -8,6 +8,8 @@ import os
 import re
 import subprocess
 from enum import Enum
+from collections import deque
+from threading import Timer
 
 
 class MessageType(Enum):
@@ -19,6 +21,9 @@ class MessageType(Enum):
     GET_MARKS = 5
     GET_BAR_CONFIG = 6
     GET_VERSION = 7
+    GET_BINDING_MODES = 8
+    GET_CONFIG = 9
+    SEND_TICK = 10
 
 
 class Event(object):
@@ -28,14 +33,17 @@ class Event(object):
     WINDOW = (1 << 3)
     BARCONFIG_UPDATE = (1 << 4)
     BINDING = (1 << 5)
-    KEY_RELEASE = (1 << 6)
-    KEY_PRESS = (1 << 7)
-
+    # 1 << 6 is shutdown
+    TICK = (1 << 7)
+    KEY_RELEASE = (1 << 8)
+    KEY_PRESS = (1 << 9)
 
 class _ReplyType(dict):
-
     def __getattr__(self, name):
-        return self[name]
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
 
     def __setattr__(self, name, value):
         self[name] = value
@@ -45,16 +53,148 @@ class _ReplyType(dict):
 
 
 class CommandReply(_ReplyType):
-    pass
+    """
+    Info about a command that was executed with :func:`Connection.command`.
+    """
+
+    def __init__(self, data):
+        super(CommandReply, self).__init__(data)
+
+    @property
+    def error(self):
+        """
+        A human-readable error message
+
+        :type: str
+        """
+        return self.__getattr__('error')
+
+    @property
+    def success(self):
+        """
+        Whether the command executed successfully
+
+        :type: bool
+        """
+        return self.__getattr__('success')
 
 
 class VersionReply(_ReplyType):
-    pass
+    """
+    Info about the version of the running i3 instance.
+    """
 
+    def __init__(self, data):
+        super(VersionReply, self).__init__(data)
+
+    @property
+    def major(self):
+        """
+        The major version of i3.
+
+        :type: int
+        """
+        return self.__getattr__('major')
+
+    @property
+    def minor(self):
+        """
+        The minor version of i3.
+
+        :type: int
+        """
+        return self.__getattr__('minor')
+
+    @property
+    def patch(self):
+        """
+        The patch version of i3.
+
+        :type: int
+        """
+        return self.__getattr__('patch')
+
+    @property
+    def human_readable(self):
+        """
+        A human-readable version of i3 containing the precise git version,
+        build date, and branch name.
+
+        :type: str
+        """
+        return self.__getattr__('human_readable')
 
 class BarConfigReply(_ReplyType):
-    pass
+    """
+    This can be used by third-party workspace bars (especially i3bar, but
+    others are free to implement compatible alternatives) to get the bar block
+    configuration from i3.
 
+    Not all properties are documented here. A complete list of properties of
+    this reply type can be found `here
+    <http://i3wm.org/docs/ipc.html#_bar_config_reply>`_.
+    """
+
+    def __init__(self, data):
+        super(BarConfigReply, self).__init__(data)
+
+    @property
+    def colors(self):
+        """
+        Contains key/value pairs of colors. Each value is a color code in hex,
+        formatted #rrggbb (like in HTML).
+
+        :type: dict
+        """
+        return self.__getattr__('colors')
+
+    @property
+    def id(self):
+        """
+        The ID for this bar.
+
+        :type: str
+        """
+        return self.__getattr__('id')
+
+    @property
+    def mode(self):
+        """
+        Either ``dock`` (the bar sets the dock window type) or ``hide`` (the
+        bar does not show unless a specific key is pressed).
+
+        :type: str
+        """
+        return self.__getattr__('mode')
+
+    @property
+    def position(self):
+        """
+        Either ``bottom`` or ``top``.
+
+        :type: str
+        """
+        return self.__getattr__('position')
+
+    @property
+    def status_command(self):
+        """
+        Command which will be run to generate a statusline. Each line on
+        stdout of this command will be displayed in the bar. At the moment, no
+        formatting is supported.
+
+        :type: str
+        """
+        return self.__getattr__('status_command')
+
+    @property
+    def font(self):
+        """
+        The font to use for text on the bar.
+
+        :type: str
+        """
+        return self.__getattr__('font')
 
 class OutputReply(_ReplyType):
     pass
@@ -64,8 +204,11 @@ class WorkspaceReply(_ReplyType):
     pass
 
 
-class WorkspaceEvent(object):
+class TickReply(_ReplyType):
+    pass
 
+
+class WorkspaceEvent(object):
     def __init__(self, data, conn):
         self.change = data['change']
         self.current = None
@@ -79,20 +222,17 @@ class WorkspaceEvent(object):
 
 
 class GenericEvent(object):
-
     def __init__(self, data):
         self.change = data['change']
 
 
 class WindowEvent(object):
-
     def __init__(self, data, conn):
         self.change = data['change']
         self.container = Con(data['container'], None, conn)
 
 
 class BarconfigUpdateEvent(object):
-
     def __init__(self, data):
         self.id = data['id']
         self.hidden_state = data['hidden_state']
@@ -100,7 +240,6 @@ class BarconfigUpdateEvent(object):
 
 
 class BindingInfo(object):
-
     def __init__(self, data):
         self.command = data['command']
         self.mods = data['mods']
@@ -110,14 +249,24 @@ class BindingInfo(object):
 
 
 class BindingEvent(object):
-
     def __init__(self, data):
         self.change = data['change']
         self.binding = BindingInfo(data['binding'])
 
 
-class _PubSub(object):
+class ConfigReply(object):
+    def __init__(self, data):
+        self.config = data['config']
 
+
+class TickEvent(object):
+    def __init__(self, data):
+        # i3 didn't include the 'first' field in 4.15. See i3/i3#3271.
+        self.first = ('first' in data) and data['first']
+        self.payload = data['payload']
+
+
+class _PubSub(object):
     def __init__(self, conn):
         self.conn = conn
         self._subscriptions = []
@@ -129,8 +278,15 @@ class _PubSub(object):
         if detailed_event.count('::') > 0:
             [event, detail] = detailed_event.split('::')
 
-        self._subscriptions.append({'event': event, 'detail': detail,
-                                    'handler': handler})
+        self._subscriptions.append({
+            'event': event,
+            'detail': detail,
+            'handler': handler
+        })
+
+    def unsubscribe(self, handler):
+        self._subscriptions = list(
+            filter(lambda s: s['handler'] != handler, self._subscriptions))
 
     def emit(self, event, data):
         detail = ''
@@ -146,11 +302,11 @@ class _PubSub(object):
                     else:
                         s['handler'](self.conn)
 
+
 # this is for compatability with i3ipc-glib
 
 
 class _PropsObject(object):
-
     def __init__(self, obj):
         object.__setattr__(self, "_obj", obj)
 
@@ -168,7 +324,7 @@ class Connection(object):
     MAGIC = 'i3-ipc'  # safety string for i3-ipc
     _chunk_size = 1024  # in bytes
     _timeout = 0.5  # in seconds
-    _struct_header = '<%dsII' % len(MAGIC.encode('utf-8'))
+    _struct_header = '=%dsII' % len(MAGIC.encode('utf-8'))
     _struct_header_size = struct.calcsize(_struct_header)
 
     def __init__(self, socket_path=None):
@@ -176,10 +332,14 @@ class Connection(object):
             socket_path = os.environ.get("I3SOCK")
 
         if not socket_path:
+            socket_path = os.environ.get("SWAYSOCK")
+
+        if not socket_path:
             try:
                 socket_path = subprocess.check_output(
                     ['i3', '--get-socketpath'],
-                    close_fds=True, universal_newlines=True).strip()
+                    close_fds=True,
+                    universal_newlines=True).strip()
             except:
                 raise Exception('Failed to retrieve the i3 IPC socket path')
 
@@ -256,6 +416,28 @@ class Connection(object):
         return json.loads(data, object_hook=CommandReply)
 
     def get_version(self):
+        """
+        Get json encoded information about the running i3 instance.  The
+        equivalent of :command:`i3-msg -t get_version`. The return
+        object exposes the following attributes :attr:`~VersionReply.major`,
+        :attr:`~VersionReply.minor`, :attr:`~VersionReply.patch`,
+        :attr:`~VersionReply.human_readable`, and
+        :attr:`~VersionReply.loaded_config_file_name`.
+
+        Example output:
+
+        .. code:: json
+
+            {'patch': 0,
+             'human_readable': '4.12 (2016-03-06, branch "4.12")',
+             'major': 4,
+             'minor': 12,
+             'loaded_config_file_name': '/home/joep/.config/i3/config'}
+
+
+        :rtype: VersionReply
+
+        """
         data = self.message(MessageType.GET_VERSION, '')
         return json.loads(data, object_hook=VersionReply)
 
@@ -286,6 +468,45 @@ class Connection(object):
         data = self.message(MessageType.GET_TREE, '')
         return Con(json.loads(data), None, self)
 
+    def get_marks(self):
+        """
+        Get a list of the names of all currently set marks.
+
+        :rtype: list
+        """
+        data = self.message(MessageType.GET_MARKS, '')
+        return json.loads(data)
+
+    def get_binding_modes(self):
+        """
+        Returns all currently configured binding modes.
+
+        :rtype: list
+        """
+        data = self.message(MessageType.GET_BINDING_MODES, '')
+        return json.loads(data)
+
+    def get_config(self):
+        """
+        Currently only contains the "config" member, which is a string
+        containing the config file as loaded by i3 most recently.
+
+        :rtype: ConfigReply
+        """
+        data = self.message(MessageType.GET_CONFIG, '')
+        return json.loads(data, object_hook=ConfigReply)
+
+    def send_tick(self, payload=""):
+        """
+        Sends a tick event with the specified payload. After the reply was
+        received, the tick event has been written to all IPC connections which
+        subscribe to tick events.
+
+        :rtype: TickReply
+        """
+        data = self.message(MessageType.SEND_TICK, payload)
+        return json.loads(data, object_hook=TickReply)
+
     def subscribe(self, events):
         events_obj = []
         if events & Event.WORKSPACE:
@@ -300,16 +521,21 @@ class Connection(object):
             events_obj.append("barconfig_update")
         if events & Event.BINDING:
             events_obj.append("binding")
+        if events & Event.TICK:
+            events_obj.append("tick")
         if events & Event.KEY_RELEASE:
             events_obj.append("key_release")
         if events & Event.KEY_PRESS:
             events_obj.append("key_press")
 
-        data = self._ipc_send(
-            self.sub_socket, MessageType.SUBSCRIBE, json.dumps(events_obj))
+        data = self._ipc_send(self.sub_socket, MessageType.SUBSCRIBE,
+                              json.dumps(events_obj))
         result = json.loads(data, object_hook=CommandReply)
         self.subscriptions |= events
         return result
+
+    def off(self, handler):
+        self._pubsub.unsubscribe(handler)
 
     def on(self, detailed_event, handler):
         event = detailed_event.replace('-', '_')
@@ -335,6 +561,8 @@ class Connection(object):
             event_type = Event.BARCONFIG_UPDATE
         elif event == "binding":
             event_type = Event.BINDING
+        elif event == "tick":
+            event_type = Event.TICK
         elif event == "key_release":
             event_type = Event.KEY_RELEASE
         elif event == "key_press":
@@ -347,85 +575,271 @@ class Connection(object):
         
         self._pubsub.subscribe(detailed_event, handler)
 
-    def main(self):
+    def event_socket_setup(self):
         self.sub_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sub_socket.connect(self.socket_path)
 
         self.subscribe(self.subscriptions)
 
-        while True:
-            if self.sub_socket is None:
-                break
+    def event_socket_teardown(self):
+        if self.sub_socket:
+            self.sub_socket.shutdown(socket.SHUT_RDWR)
+        self.sub_socket = None
 
-            data, msg_type = self._ipc_recv(self.sub_socket)
+    def event_socket_poll(self):
+        if self.sub_socket is None:
+            return True
 
-            if len(data) == 0:
-                # EOF
-                self._pubsub.emit('ipc_shutdown', None)
-                break
+        data, msg_type = self._ipc_recv(self.sub_socket)
+        
+        if len(data) == 0:
+            # EOF
+            self._pubsub.emit('ipc_shutdown', None)
+            return True
 
-            data = json.loads(data)
-            msg_type = 1 << (msg_type & 0x7f)
-            event_name = ''
-            event = None
+        data = json.loads(data)
+        msg_type = 1 << (msg_type & 0x7f)
+        event_name = ''
+        event = None
 
-            if msg_type == Event.WORKSPACE:
-                event_name = 'workspace'
-                event = WorkspaceEvent(data, self)
-            elif msg_type == Event.OUTPUT:
-                event_name = 'output'
-                event = GenericEvent(data)
-            elif msg_type == Event.MODE:
-                event_name = 'mode'
-                event = GenericEvent(data)
-            elif msg_type == Event.WINDOW:
-                event_name = 'window'
-                event = WindowEvent(data, self)
-            elif msg_type == Event.BARCONFIG_UPDATE:
-                event_name = 'barconfig_update'
-                event = BarconfigUpdateEvent(data)
-            elif msg_type == Event.BINDING:
-                event_name = 'binding'
-                event = BindingEvent(data)
-            elif msg_type == Event.KEY_RELEASE:
-                event_name = 'key_release'
-                event = GenericEvent(data)
-            elif msg_type == Event.KEY_PRESS:
-                event_name = 'key_press'
-                event = GenericEvent(data)
-            else:
-                # we have not implemented this event
-                continue
+        if msg_type == Event.WORKSPACE:
+            event_name = 'workspace'
+            event = WorkspaceEvent(data, self)
+        elif msg_type == Event.OUTPUT:
+            event_name = 'output'
+            event = GenericEvent(data)
+        elif msg_type == Event.MODE:
+            event_name = 'mode'
+            event = GenericEvent(data)
+        elif msg_type == Event.WINDOW:
+            event_name = 'window'
+            event = WindowEvent(data, self)
+        elif msg_type == Event.BARCONFIG_UPDATE:
+            event_name = 'barconfig_update'
+            event = BarconfigUpdateEvent(data)
+        elif msg_type == Event.BINDING:
+            event_name = 'binding'
+            event = BindingEvent(data)
+        elif msg_type == Event.TICK:
+            event_name = 'tick'
+            event = TickEvent(data)
+        elif msg_type == Event.KEY_RELEASE:
+            event_name = 'key_release'
+            event = GenericEvent(data)
+        elif msg_type == Event.KEY_PRESS:
+            event_name = 'key_press'
+            event = GenericEvent(data)
+        else:
+            # we have not implemented this event
+            return
 
-            self._pubsub.emit(event_name, event)
+        self._pubsub.emit(event_name, event)
+
+    def main(self, timeout=0):
+        try:
+            self.event_socket_setup()
+
+            timer = None
+
+            if timeout:
+                timer = Timer(timeout, self.main_quit)
+                timer.start()
+
+            while not self.event_socket_poll():
+                pass
+
+            if timer:
+                timer.cancel()
+        finally:
+            self.main_quit()
 
     def main_quit(self):
-        if self.sub_socket:
-            self.sub_socket.shutdown(socket.SHUT_WR)
-        self.sub_socket = None
+        self.event_socket_teardown()
 
 
 class Rect(object):
-
     def __init__(self, data):
         self.x = data['x']
         self.y = data['y']
         self.height = data['height']
         self.width = data['width']
 
+class Gaps(object):
+    def __init__(self, data):
+        self.inner = data['inner']
+        self.outer = data['outer']
+
 
 class Con(object):
+    """
+    The container class. Has all internal information about the windows,
+    outputs, workspaces and containers that :command:`i3` manages.
 
+    .. attribute:: id
+
+        The internal ID (actually a C pointer value within i3) of the container.
+        You can use it to (re-)identify and address containers when talking to
+        i3.
+
+    .. attribute:: name
+
+        The internal name of the container.  ``None`` for containers which
+        are not leaves.  The string `_NET_WM_NAME <://specifications.freedesktop.org/wm-spec/1.3/ar01s05.html#idm140238712347280>`_
+        for windows. Read-only value.
+
+    .. attribute:: type
+
+        The type of the container. Can be one of ``root``, ``output``, ``con``,
+        ``floating_con``, ``workspace`` or ``dockarea``.
+
+    .. attribute:: title
+
+        The window title.
+
+    .. attribute:: window_class
+
+        The window class.
+
+    .. attribute:: instance
+
+        The instance name of the window class.
+
+    .. attribute:: gaps
+
+        The inner and outer gaps devation from default values.
+
+    .. attribute:: border
+
+        The type of border style for the selected container. Can be either
+        ``normal``, ``none`` or ``1pixel``.
+
+    .. attribute:: current_border_width
+
+       Returns amount of pixels for the border. Readonly value. See `i3's user
+       manual <https://i3wm.org/docs/userguide.html#_border_style_for_new_windows>_
+       for more info.
+
+    .. attribute:: layout
+
+        Can be either ``splith``, ``splitv``, ``stacked``, ``tabbed``, ``dockarea`` or
+        ``output``.
+        :rtype: string
+
+    .. attribute:: percent
+
+        The percentage which this container takes in its parent. A value of
+        null means that the percent property does not make sense for this
+        container, for example for the root container.
+        :rtype: float
+
+    .. attribute:: rect
+
+        The absolute display coordinates for this container. Display
+        coordinates means that when you have two 1600x1200 monitors on a single
+        X11 Display (the standard way), the coordinates of the first window on
+        the second monitor are ``{ "x": 1600, "y": 0, "width": 1600, "height":
+        1200 }``.
+
+    .. attribute:: window_rect
+
+        The coordinates of the *actual client window* inside the container,
+        without the window decorations that may also occupy space.
+
+    .. attribute:: deco_rect
+
+        The coordinates of the window decorations within a container. The
+        coordinates are relative to the container and do not include the client
+        window.
+
+    .. attribute:: geometry
+
+        The original geometry the window specified when i3 mapped it. Used when
+        switching a window to floating mode, for example.
+
+    .. attribute:: window
+
+        The X11 window ID of the client window.
+
+    .. attribute:: focus
+
+        A list of container ids describing the focus situation within the current
+        container. The first element refers to the container with (in)active focus.
+
+    .. attribute:: focused
+
+        Whether or not the current container is focused. There is only
+        one focused container.
+
+    .. attribute:: visible
+
+        Whether or not the current container is visible.
+
+    .. attribute:: num
+
+        Optional attribute that only makes sense for workspaces. This allows
+        for arbitrary and changeable names, even though the keyboard
+        shortcuts remain the same.  See `the i3wm docs <https://i3wm.org/docs/userguide.html#_named_workspaces>`_
+        for more information
+
+    .. attribute:: urgent
+
+        Whether the window or workspace has the `urgent` state.
+
+        :returns: :bool:`True` or :bool:`False`.
+
+    .. attribute:: floating
+
+        Whether the container is floating or not. Possible values are
+        "auto_on", "auto_off", "user_on" and "user_off"
+
+
+    ..
+        command <-- method
+        command_children <-- method
+        deco_rect IPC
+        descendents
+        find_by_id
+        find_by_role
+        find_by_window
+        find_classed
+        find_focused
+        find_fullscreen
+        find_marked
+        find_named
+        floating
+        floating_nodes
+        fullscreen_mode
+        gaps
+        leaves
+        marks
+        nodes
+        orientation
+        parent
+        props
+        root
+        scratchpad
+        scratchpad_state
+        window_class
+        window_instance
+        window_rect
+        window_role
+        workspace
+        workspaces
+
+
+    """
     def __init__(self, data, parent, conn):
         self.props = _PropsObject(self)
         self._conn = conn
         self.parent = parent
 
         # set simple properties
-        ipc_properties = ['border', 'current_border_width', 'focused',
-                          'fullscreen_mode', 'id', 'layout', 'marks', 'name',
-                          'orientation', 'percent', 'type', 'urgent', 'window',
-                          'num', 'scratchpad_state']
+        ipc_properties = [
+            'border', 'current_border_width', 'floating', 'focus', 'focused',
+            'fullscreen_mode', 'id', 'layout', 'marks', 'name', 'num',
+            'orientation', 'percent', 'scratchpad_state', 'sticky', 'type',
+            'urgent', 'window'
+        ]
         for attr in ipc_properties:
             if attr in data:
                 setattr(self, attr, data[attr])
@@ -453,12 +867,14 @@ class Con(object):
 
         # set complex properties
         self.nodes = []
-        for n in data['nodes']:
-            self.nodes.append(Con(n, self, conn))
+        if 'nodes' in data:
+            for n in data['nodes']:
+                self.nodes.append(Con(n, self, conn))
 
         self.floating_nodes = []
-        for n in data['floating_nodes']:
-            self.floating_nodes.append(Con(n, self, conn))
+        if 'floating_nodes' in data:
+            for n in data['floating_nodes']:
+                self.floating_nodes.append(Con(n, self, conn))
 
         self.window_class = None
         self.window_instance = None
@@ -477,6 +893,23 @@ class Con(object):
         if 'deco_rect' in data:
             self.deco_rect = Rect(data['deco_rect'])
 
+        self.gaps = None
+        if 'gaps' in data:
+            self.gaps = Gaps(data['gaps'])
+
+    def __iter__(self):
+        """
+        Iterate through the descendents of this node (breadth-first tree traversal)
+        """
+        queue = deque(self.nodes)
+        queue.extend(self.floating_nodes)
+
+        while queue:
+            con = queue.popleft()
+            yield con
+            queue.extend(con.nodes)
+            queue.extend(con.floating_nodes)
+
     def root(self):
         if not self.parent:
             return self
@@ -489,30 +922,30 @@ class Con(object):
         return con
 
     def descendents(self):
-        descendents = []
+        """
+        Retrieve a list of all containers that delineate from the currently
+        selected container.  Includes any kind of container.
 
-        def collect_descendents(con):
-            for c in con.nodes:
-                descendents.append(c)
-                collect_descendents(c)
-            for c in con.floating_nodes:
-                descendents.append(c)
-                collect_descendents(c)
-
-        collect_descendents(self)
-        return descendents
+        :rtype: List of :class:`Con`.
+        """
+        return [c for c in self]
 
     def leaves(self):
         leaves = []
 
-        for c in self.descendents():
+        for c in self:
             if not c.nodes and c.type == "con" and c.parent.type != "dockarea":
                 leaves.append(c)
 
         return leaves
 
     def command(self, command):
-        self._conn.command('[con_id="{}"] {}'.format(self.id, command))
+        """
+        Run a command on the currently active container.
+
+        :rtype: CommandReply
+        """
+        return self._conn.command('[con_id="{}"] {}'.format(self.id, command))
 
     def command_children(self, command):
         if not len(self.nodes):
@@ -540,42 +973,51 @@ class Con(object):
 
     def find_focused(self):
         try:
-            return next(c for c in self.descendents() if c.focused)
+            return next(c for c in self if c.focused)
         except StopIteration:
             return None
 
     def find_by_id(self, id):
         try:
-            return next(c for c in self.descendents() if c.id == id)
+            return next(c for c in self if c.id == id)
         except StopIteration:
             return None
 
     def find_by_window(self, window):
         try:
-            return next(c for c in self.descendents() if c.window == window)
+            return next(c for c in self if c.window == window)
         except StopIteration:
             return None
 
     def find_by_role(self, pattern):
-        return [c for c in self.descendents()
-                if c.window_role and re.search(pattern, c.window_role)]
+        return [
+            c for c in self
+            if c.window_role and re.search(pattern, c.window_role)
+        ]
 
     def find_named(self, pattern):
-        return [c for c in self.descendents()
-                if c.name and re.search(pattern, c.name)]
+        return [c for c in self if c.name and re.search(pattern, c.name)]
 
     def find_classed(self, pattern):
-        return [c for c in self.descendents()
-                if c.window_class and re.search(pattern, c.window_class)]
+        return [
+            c for c in self
+            if c.window_class and re.search(pattern, c.window_class)
+        ]
+
+    def find_instanced(self, pattern):
+        return [
+            c for c in self
+            if c.window_instance and re.search(pattern, c.window_instance)
+        ]
 
     def find_marked(self, pattern=".*"):
         pattern = re.compile(pattern)
-        return [c for c in self.descendents()
-                if any(pattern.search(mark) for mark in c.marks)]
+        return [
+            c for c in self if any(pattern.search(mark) for mark in c.marks)
+        ]
 
     def find_fullscreen(self):
-        return [c for c in self.descendents()
-                if c.type == 'con' and c.fullscreen_mode]
+        return [c for c in self if c.type == 'con' and c.fullscreen_mode]
 
     def workspace(self):
         if self.type == 'workspace':
